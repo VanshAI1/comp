@@ -13,7 +13,7 @@ st.set_page_config(page_title="Product Analysis Dashboard", layout="wide")
 
 # Initialize Groq client
 groq_client = Groq(
-    api_key="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"  # Replace with your actual API key
+    api_key=st.secrets["GROQ_API_KEY"]
 )
 
 # Load and prepare data
