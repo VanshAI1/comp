@@ -1,3 +1,7 @@
 groq
 plotly
 scikit-learn
+streamlit
+pandas
+xgboost
+joblib
