@@ -7,6 +7,14 @@ import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics.pairwise import cosine_similarity
 import json
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, r2_score
+from xgboost import XGBRegressor
+import joblib
+import os
+import pandas as pd
+import plotly.express as px
+import datetime
 
 # Configure page settings
 st.set_page_config(page_title="Product Analysis Dashboard", layout="wide")
@@ -25,6 +33,305 @@ def load_data():
     clean_data['product_index'] = range(len(clean_data))
     return clean_data, full_data
 
+
+@st.cache_resource
+def train_or_load_model(data):
+    """Train or load the XGBoost model for demand prediction."""
+    # Features for training
+    training_columns = ['price', 'review_growth_rate', 'Cotton', 'Polyester', 'Round Neck', 'Polo Neck', 'Short Sleeve', 'Long Sleeve']
+    target_column = 'reviews'  # Target variable
+
+    # Define input features and target variable
+    X = data[training_columns]
+    y = data[target_column]
+
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+    # Check for an existing model
+    model_path = "xgboost_demand_model.joblib"
+    if os.path.exists(model_path):
+        # Load the existing model
+        model = joblib.load(model_path)
+    else:
+        # Train the model
+        model = XGBRegressor(n_estimators=100, learning_rate=0.1, max_depth=5, random_state=42)
+        model.fit(X_train, y_train)
+
+        # Save the trained model for future use
+        joblib.dump(model, model_path)
+
+    return model, X_test, y_test
+
+def generate_predictions(model, clean_data, days_ahead=30):
+    """Generate predictions for the clean_data with future dates."""
+    # Generate a DataFrame for future prediction
+    future_data = generate_future_data(clean_data, days_ahead)
+    
+    # Make predictions
+    future_data["predicted_reviews"] = model.predict(
+        future_data[["price", "review_growth_rate", "Cotton", "Polyester", "Round Neck", "Polo Neck", "Short Sleeve", "Long Sleeve"]]
+    )
+    
+    # Add product_id for grouping trends
+    if "product_index" in clean_data.columns:
+        # Repeat product_index to match the future_data length
+        num_products = len(clean_data)
+        repeat_factor = len(future_data) // num_products  # How many times to repeat each product
+        remainder = len(future_data) % num_products      # Handle cases where it's not an exact multiple
+
+        # Repeat product indices and handle remainder
+        product_ids = list(clean_data["product_index"]) * repeat_factor + list(clean_data["product_index"][:remainder])
+        future_data["product_id"] = product_ids
+    
+    return future_data
+
+
+def generate_future_data(clean_data, days_ahead=30):
+    """Generate future data for prediction."""
+    future_dates = [datetime.date.today() + datetime.timedelta(days=i) for i in range(days_ahead)]
+    future_data = []
+
+    # Use sample products from clean_data for prediction
+    for _, product in clean_data.sample(n=10, random_state=42).iterrows():  # Adjust n as needed
+        for date in future_dates:
+            future_data.append({
+                'date': date,
+                'price': product['price'],  # Use existing product price
+                'review_growth_rate': product['review_growth_rate'],  # Use existing growth rate
+                'Cotton': product['Cotton'],
+                'Polyester': product['Polyester'],
+                'Round Neck': product['Round Neck'],
+                'Polo Neck': product['Polo Neck'],
+                'Short Sleeve': product['Short Sleeve'],
+                'Long Sleeve': product['Long Sleeve']
+            })
+
+    return pd.DataFrame(future_data)
+
+
+
+def visualize_trends(clean_data, predictions_df):
+    st.header("Consumer Behavior Trends")
+
+    # Add tabs for Emerging Trends and Top Trending Products
+    tab1, tab2 = st.tabs(["Emerging Trends & Recommendations", "Top Trending Products"])
+
+    # Emerging Trends & Recommendations
+    with tab1:
+        st.subheader("Emerging Trends & Recommendations")
+        
+        # Analyze trends for features like materials, neck types, etc.
+        feature_trends = predictions_df.copy()
+        feature_trends["material"] = feature_trends["Cotton"].apply(lambda x: "Cotton" if x == 1 else "Polyester")
+        feature_trends["neck_type"] = feature_trends["Round Neck"].apply(lambda x: "Round Neck" if x == 1 else "Polo Neck")
+        feature_trends["sleeve_type"] = feature_trends["Short Sleeve"].apply(lambda x: "Short Sleeve" if x == 1 else "Long Sleeve")
+        
+        # Aggregate feature trends over time
+        feature_demand = feature_trends.groupby(["date", "material", "neck_type", "sleeve_type"])["predicted_reviews"].sum().reset_index()
+        
+        # Visualize feature trends over time
+        fig_features = px.line(
+            feature_demand,
+            x="date",
+            y="predicted_reviews",
+            color="material",
+            line_group="neck_type",
+            facet_col="sleeve_type",
+            title="Emerging Feature Trends Over Time",
+            labels={"predicted_reviews": "Predicted Reviews"}
+        )
+        st.plotly_chart(fig_features)
+
+        # Insights & Recommendations
+        st.subheader("Actionable Recommendations")
+        
+        # Identify emerging trends
+        emerging_material = feature_demand.groupby("material")["predicted_reviews"].mean().idxmax()
+        emerging_neck_type = feature_demand.groupby("neck_type")["predicted_reviews"].mean().idxmax()
+        emerging_sleeve_type = feature_demand.groupby("sleeve_type")["predicted_reviews"].mean().idxmax()
+
+        st.write("### Key Insights")
+        st.markdown(f"1. **Emerging Material Preference**: Consumers are showing a preference for **{emerging_material}** products.")
+        st.markdown(f"2. **Popular Neck Type**: **{emerging_neck_type}** products are seeing the highest growth in demand.")
+        st.markdown(f"3. **Trending Sleeve Type**: Products with **{emerging_sleeve_type}** are gaining traction.")
+
+        st.write("### Recommendations")
+        st.markdown(
+            f"- **Focus on Material**: Expand the product line for **{emerging_material}** to align with growing consumer preferences.\n"
+            f"- **Feature Optimization**: Prioritize **{emerging_neck_type}** neck designs to capture higher market demand.\n"
+            f"- **Sleeve Preferences**: Adjust the product line to include more **{emerging_sleeve_type}** options."
+        )
+
+    # Top Trending Products
+    with tab2:
+        st.subheader("Top Trending Products")
+        
+        # Identify the top trending products
+        top_trending_products = (
+            predictions_df.groupby("product_id")["predicted_reviews"].sum()
+            .sort_values(ascending=False)
+            .head(5)  # Top 5 products
+        )
+        
+        # Extract product details
+        trending_products_details = clean_data[clean_data['product_index'].isin(top_trending_products.index)]
+        trending_products_details['total_predicted_reviews'] = top_trending_products.values
+
+        # Display as a table without Product ID
+        st.write("### Top 5 Trending Products")
+        st.table(trending_products_details[[
+            'price', 'rating', 'reviews', 'total_predicted_reviews'
+        ]].rename(columns={
+            'price': 'Price (₹)',
+            'rating': 'Rating',
+            'reviews': 'Reviews (Current)',
+            'total_predicted_reviews': 'Predicted Reviews (Trending)'
+        }))
+        
+        # Highlight the top trending product
+        top_product = trending_products_details.iloc[0]
+        st.write("#### 🚀 Most Trending Product")
+        st.write(f"**Price:** ₹{top_product['price']}")
+        st.write(f"**Rating:** {top_product['rating']}⭐")
+        st.write(f"**Current Reviews:** {int(top_product['reviews']):,}")
+        st.write(f"**Predicted Reviews:** {int(top_product['total_predicted_reviews']):,}")
+
+def feature_importance_analysis(model, data):
+    st.header("Feature Importance Analysis")
+
+    # Extract feature importance from the model
+    feature_importances = pd.DataFrame({
+        "Feature": model.get_booster().feature_names,
+        "Importance": model.feature_importances_
+    }).sort_values(by="Importance", ascending=False)
+
+    # Highlight the top 3 features
+    top_features = feature_importances.head(3)
+    feature_importances["Color"] = feature_importances["Feature"].apply(
+        lambda x: "Top Feature" if x in top_features["Feature"].values else "Other"
+    )
+
+    # Create the bar chart with enhanced labels and colors
+    fig_importance = px.bar(
+        feature_importances,
+        x="Importance",
+        y="Feature",
+        color="Color",
+        color_discrete_map={"Top Feature": "blue", "Other": "lightblue"},
+        orientation='h',
+        title="Feature Importance: Impact on Demand Prediction",
+        labels={"Importance": "Impact on Demand Prediction", "Feature": "Feature"}
+    )
+    st.plotly_chart(fig_importance)
+
+    st.subheader("Behavioral Insights")
+    st.write("**How different product features perform based on average reviews:**")
+    
+    # Features for behavioral insights
+    features = ['Cotton', 'Polyester', 'Round Neck', 'Polo Neck', 'Short Sleeve', 'Long Sleeve']
+    
+    for feature in features:
+        # Avoid calculating metrics for missing data
+        if feature in data.columns:
+            avg_reviews = data[data[feature] == 1]['reviews'].mean()
+            if not pd.isna(avg_reviews):
+                st.metric(feature, f"Average Reviews: {avg_reviews:.2f}")
+            else:
+                st.metric(feature, "No Data Available")
+        else:
+            st.metric(feature, "Feature Missing")
+
+    # Add a call-to-action or recommendation
+    st.write("### Recommendations:")
+    st.write("- Focus on optimizing **Cotton**, **Price**, and **Review Growth Rate** to drive demand.")
+    st.write("- Promote **Short Sleeve** and **Round Neck** designs for better consumer engagement.")
+    st.write("- Avoid features with minimal importance like **Long Sleeve** unless targeting niche markets.")
+
+
+
+def forecast_future_demand(model, data):
+    st.header("Product Strategy Tool")
+
+    # Step 1: Collect User Inputs
+    st.subheader("Product Configuration")
+    price = st.number_input("Enter Product Price", min_value=0, max_value=2000, value=500, key="strategy_price")
+    review_growth_rate = st.slider("Expected Review Growth Rate", min_value=0.0, max_value=0.5, value=0.1, key="strategy_review_growth")
+    material = st.selectbox("Select Material", ["Cotton", "Polyester"], key="strategy_material")
+    neck_type = st.selectbox("Select Neck Type", ["Round Neck", "Polo Neck"], key="strategy_neck")
+    sleeve_type = st.selectbox("Select Sleeve Type", ["Short Sleeve", "Long Sleeve"], key="strategy_sleeve")
+
+    # Create DataFrame for the user's input
+    user_product = pd.DataFrame({
+        'price': [price],
+        'review_growth_rate': [review_growth_rate],
+        'Cotton': [1 if material == "Cotton" else 0],
+        'Polyester': [1 if material == "Polyester" else 0],
+        'Round Neck': [1 if neck_type == "Round Neck" else 0],
+        'Polo Neck': [1 if neck_type == "Polo Neck" else 0],
+        'Short Sleeve': [1 if sleeve_type == "Short Sleeve" else 0],
+        'Long Sleeve': [1 if sleeve_type == "Long Sleeve" else 0]
+    })
+
+    # Step 2: Predict Demand
+    predicted_demand = model.predict(user_product)[0]
+    st.metric("Predicted Demand (Reviews)", f"{int(predicted_demand):,}")
+
+    # Step 3: Analyze Data for Recommendations
+    st.subheader("Recommendations and Insights")
+
+    # Price Optimization
+    st.markdown("### Price Optimization")
+    # data['price_segment'] = pd.cut(data['price'], bins=5, labels=["Budget", "Economy", "Mid-Range", "Premium", "Luxury"])
+    price_segments = pd.cut(
+        data['price'],
+        bins=5,
+        labels=["Budget", "Economy", "Mid-Range", "Premium", "Luxury"]
+    )
+    # Convert categories to strings for proper display
+    data['price_segment'] = price_segments.astype(str)
+
+    segment_performance = data.groupby('price_segment').agg({'price': 'mean', 'reviews': 'mean', 'rating': 'mean'}).round(2)
+    user_segment = pd.cut([price], bins=5, labels=["Budget", "Economy", "Mid-Range", "Premium", "Luxury"])[0]
+
+    st.write(f"Your product falls under the **{user_segment}** segment.")
+    st.dataframe(segment_performance)
+
+    # Feature Prioritization
+    st.markdown("### Feature Prioritization")
+    feature_performance = []
+    features = ['Cotton', 'Polyester', 'Round Neck', 'Polo Neck', 'Short Sleeve', 'Long Sleeve']
+    for feature in features:
+        if data[feature].sum() > 0:  # Avoid division by zero
+            feature_demand = data[data[feature] == 1]['reviews'].mean()
+            feature_popularity = (data[feature].sum() / len(data)) * 100
+        else:
+            feature_demand = "Insufficient Data"
+            feature_popularity = "Insufficient Data"
+        
+        feature_performance.append({
+            "Feature": feature,
+            "Avg Demand": feature_demand if feature_demand != "Insufficient Data" else None,
+            "Popularity": feature_popularity if feature_popularity != "Insufficient Data" else 0
+        })
+
+    feature_df = pd.DataFrame(feature_performance).sort_values(by="Avg Demand", ascending=False, na_position='last')
+    st.dataframe(feature_df)
+
+    # Suggested Adjustments
+    st.markdown("### Suggested Adjustments")
+    if predicted_demand < data['reviews'].mean():
+        st.write("1. **Price Optimization**: Consider adjusting the price to align with high-demand products.")
+        st.write("2. **Feature Adjustment**: Consider adding high-demand features such as:")
+        for _, row in feature_df.iterrows():
+            if row["Avg Demand"] is not None:
+                st.write(f"- **{row['Feature']}**: Avg Demand = {row['Avg Demand']:.1f}, Popularity = {row['Popularity']:.1f}%")
+    else:
+        st.write("Your product is already well-aligned with the market demand.")
+
+
+
+
 def convert_numpy_types(obj):
     """Recursively convert numpy types to Python native types"""
     if isinstance(obj, dict):
@@ -38,6 +345,38 @@ def convert_numpy_types(obj):
     elif isinstance(obj, np.ndarray):
         return obj.tolist()
     return obj
+
+
+def display_demand_prediction_tab(clean_data, user_product):
+    st.header("Demand Prediction")
+
+    # Train or load the model
+    model, X_test, y_test = train_or_load_model(clean_data)
+
+    # Predict demand for the user product
+    prediction = model.predict(user_product)[0]
+    st.subheader("Predicted Demand")
+    st.metric("Estimated Reviews (Demand Proxy)", f"{int(prediction):,}")
+
+    # Display model performance metrics
+    y_pred = model.predict(X_test)
+    mse = mean_squared_error(y_test, y_pred)
+    r2 = r2_score(y_test, y_pred)
+
+    st.subheader("Model Performance")
+    st.metric("Mean Squared Error", f"{mse:.2f}")
+    st.metric("R-squared", f"{r2:.2f}")
+
+    # Display feature importance
+    st.subheader("Feature Importance")
+    feature_importances = pd.DataFrame({
+        "Feature": model.get_booster().feature_names,
+        "Importance": model.feature_importances_
+    }).sort_values(by="Importance", ascending=False)
+
+    fig_importance = px.bar(feature_importances, x="Importance", y="Feature", orientation='h',
+                            title="Feature Importance for Demand Prediction")
+    st.plotly_chart(fig_importance)
 
 def get_market_insights(data):
     """Generate market insights using Groq LLM"""
@@ -160,18 +499,21 @@ def main():
     neck_type = st.sidebar.selectbox("Neck Type", ["Round Neck", "Polo Neck"])
     sleeve_type = st.sidebar.selectbox("Sleeve Type", ["Short Sleeve", "Long Sleeve"])
     
+
     user_product = pd.DataFrame({
-        'price': [price],
-        'Cotton': [1 if material == "Cotton" else 0],
-        'Polyester': [1 if material == "Polyester" else 0],
-        'Round Neck': [1 if neck_type == "Round Neck" else 0],
-        'Polo Neck': [1 if neck_type == "Polo Neck" else 0],
-        'Short Sleeve': [1 if sleeve_type == "Short Sleeve" else 0],
-        'Long Sleeve': [1 if sleeve_type == "Long Sleeve" else 0]
+    'price': [price],
+    'review_growth_rate': [0],
+    'Cotton': [1 if material == "Cotton" else 0],
+    'Polyester': [1 if material == "Polyester" else 0],
+    'Round Neck': [1 if neck_type == "Round Neck" else 0],
+    'Polo Neck': [1 if neck_type == "Polo Neck" else 0],
+    'Short Sleeve': [1 if sleeve_type == "Short Sleeve" else 0],
+    'Long Sleeve': [1 if sleeve_type == "Long Sleeve" else 0]
     })
+
     
-    tab1, tab2, tab3 = st.tabs(["Market Overview", "Competitive Analysis", "Product Insights"])
-    
+    tab1, tab2, tab3, tab4 = st.tabs(["Market Overview", "Competitive Analysis", "Product Insights","Demand Prediction"])
+      
     with tab1:
         st.header("Market Overview")
         
@@ -548,6 +890,26 @@ def main():
                 clamped_value = max(0, min(1, value))
                 st.progress(clamped_value)
                 st.caption(factor.replace('_', ' ').title())
+  
+    # with tab4:
+    #     display_demand_prediction_tab(clean_data, user_product)
+    with tab4:
+        st.header("Demand & Trend Forecasting")
+        
+        model, X_test, y_test = train_or_load_model(clean_data)
+        predictions_df = generate_predictions(model, clean_data, days_ahead=30)
+        # Visualize consumer behavior trends
+     
+        forecast_future_demand(model,clean_data)
+        visualize_trends(clean_data, predictions_df)
+        
+        # Analyze feature importance
+        
+        feature_importance_analysis(model, clean_data)
+        
+        
+
+
 
 def create_market_analysis_prompt(market_summary):
     # Convert all numpy types to Python native types
